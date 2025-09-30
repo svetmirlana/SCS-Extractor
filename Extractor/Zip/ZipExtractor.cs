@@ -62,6 +62,7 @@ namespace Extractor.Zip
             var scsName = Path.GetFileName(ScsPath);
             foreach (var entry in entriesToExtract)
             {
+                ThrowIfCancellationRequested();
                 try
                 {
                     if (!substitutions.TryGetValue(entry.FileName, out string fileName))
@@ -129,6 +130,7 @@ namespace Extractor.Zip
         /// <param name="destination">The directory to extract the file to.</param>
         private void ExtractEntry(CentralDirectoryFileHeader entry, string outputRoot, string fileName)
         {
+            ThrowIfCancellationRequested();
             var outputPath = Path.Combine(outputRoot, fileName);
             if (File.Exists(outputPath) && !Overwrite)
             {

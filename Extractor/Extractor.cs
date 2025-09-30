@@ -1,7 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
+using Extractor.Progress;
 using TruckLib;
 using TruckLib.Models;
 using TruckLib.Sii;
@@ -82,6 +84,16 @@ namespace Extractor
         public bool PrintTimesEnabled { get; set; } = false;
 
         /// <summary>
+        /// Cancellation token observed during extraction.
+        /// </summary>
+        public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
+        /// <summary>
+        /// Progress reporter assigned by callers. Can be null.
+        /// </summary>
+        public ExtractionProgressTracker ProgressTracker { get; set; }
+
+
+        /// <summary>
         /// Files which were renamed because they contained invalid characters.
         /// </summary>
         protected List<(string ArchivePath, string SanitizedPath)> renamedFiles = [];
@@ -114,6 +126,16 @@ namespace Extractor
         public abstract void PrintExtractionResult();
 
         public abstract void Dispose();
+
+        protected void ThrowIfCancellationRequested()
+        {
+            CancellationToken.ThrowIfCancellationRequested();
+        }
+
+        protected void ReportExtractionProgress(string archivePath = null)
+        {
+            ProgressTracker?.IncrementExtraction(1, archivePath);
+        }
 
         internal static bool ExtractWithSubstitutionsIfRequired(string archivePath, string outputPath,
             byte[] buffer, Dictionary<string, string> substitutions)
@@ -179,4 +201,12 @@ namespace Extractor
         }
     }
 }
+
+
+
+
+
+
+
+
 

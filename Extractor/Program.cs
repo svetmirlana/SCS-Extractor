@@ -1,12 +1,15 @@
-﻿using Extractor.Deep;
+using Extractor.Deep;
 using Extractor.Zip;
+using Extractor.Progress;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using static Extractor.PathUtils;
 
 namespace Extractor
@@ -15,157 +18,265 @@ namespace Extractor
     {
         private const string Version = "2025-09-18";
         private static bool launchedByExplorer = false;
+        private static bool consoleAllocated = false;
+        private static readonly object RunLock = new();
         private static Options opt;
 
+        [STAThread]
         public static void Main(string[] args)
         {
-            if (OperatingSystem.IsWindows())
+            if (args.Length == 0)
             {
-                // Detect whether the extractor was launched by Explorer to pause at the end
-                // so that people who just want to drag and drop a file onto it can read the
-                // error message if one occurs.
-                // This works for both conhost and Windows Terminal.
-                launchedByExplorer = !Debugger.IsAttached &&
-                    Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(Console.Title)) ==
-                    Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
-            }
-
-            Console.OutputEncoding = Encoding.UTF8;
-
-            opt = new Options();
-            opt.Parse(args);
-
-            // Configure sanitization behavior
-            PathUtils.LegacyReplaceMode = opt.LegacySanitize;
-
-            if (opt.PrintHelp || args.Length == 0)
-            {
-                Console.WriteLine($"Extractor {Version}\n");
-                Console.WriteLine("Usage:\n  extractor path... [options]\n");
-                Console.WriteLine("Options:");
-                opt.OptionSet.WriteOptionDescriptions(Console.Out);
-                PauseIfNecessary();
-                return;
-            }
-            if (opt.InputPaths.Count == 0)
-            {
-                Console.Error.WriteLine("No input paths specified.");
-                PauseIfNecessary();
+                LaunchGui();
                 return;
             }
 
-            Run();
-            PauseIfNecessary();
+            var exitCode = RunCore(args, Console.Out, Console.Error, CancellationToken.None, isGuiHosted: false, progressSink: null);
+            Environment.ExitCode = exitCode;
         }
 
-        private static void Run()
+        public static int RunExtraction(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken cancellationToken, IExtractionProgressSink progressSink = null)
         {
+            return RunCore(args, stdout, stderr, cancellationToken, isGuiHosted: true, progressSink);
+        }
+
+        private static int RunCore(string[] args, TextWriter stdout, TextWriter stderr, CancellationToken cancellationToken, bool isGuiHosted, IExtractionProgressSink progressSink)
+        {
+            lock (RunLock)
+            {
+                var originalOut = Console.Out;
+                var originalError = Console.Error;
+
+                try
+                {
+                    if (stdout is not null && !ReferenceEquals(stdout, originalOut))
+                    {
+                        Console.SetOut(stdout);
+                    }
+
+                    if (stderr is not null && !ReferenceEquals(stderr, originalError))
+                    {
+                        Console.SetError(stderr);
+                    }
+
+                    consoleAllocated = false;
+                    launchedByExplorer = false;
+
+                    if (!isGuiHosted && OperatingSystem.IsWindows() && !Console.IsOutputRedirected && !Console.IsErrorRedirected)
+                    {
+                        consoleAllocated = ConsoleManager.EnsureConsole();
+                        launchedByExplorer = !Debugger.IsAttached && consoleAllocated;
+                    }
+                    else
+                    {
+                        launchedByExplorer = false;
+                    }
+
+                    if (!Console.IsOutputRedirected)
+                    {
+                        try
+                        {
+                            Console.OutputEncoding = Encoding.UTF8;
+                        }
+                        catch (IOException)
+                        {
+                        }
+                        catch (ArgumentException)
+                        {
+                        }
+                    }
+
+                    opt = new Options();
+                    opt.Parse(args);
+
+                    PathUtils.LegacyReplaceMode = opt.LegacySanitize;
+
+                    if (opt.PrintHelp)
+                    {
+                        Console.WriteLine($"Extractor {Version}");
+                        Console.WriteLine();
+                        Console.WriteLine("Usage:");
+                        Console.WriteLine("  extractor path... [options]");
+                        Console.WriteLine();
+                        Console.WriteLine("Options:");
+                        opt.OptionSet.WriteOptionDescriptions(Console.Out);
+                        if (!isGuiHosted)
+                        {
+                            PauseIfNecessary();
+                        }
+                        return 0;
+                    }
+
+                    if (opt.InputPaths.Count == 0)
+                    {
+                        Console.Error.WriteLine("No input paths specified.");
+                        if (!isGuiHosted)
+                        {
+                            PauseIfNecessary();
+                        }
+                        return 1;
+                    }
+
+                    var exitCode = Run(cancellationToken, progressSink);
+
+                    if (!isGuiHosted)
+                    {
+                        PauseIfNecessary();
+                    }
+
+                    return exitCode;
+                }
+                finally
+                {
+                    Console.SetOut(originalOut);
+                    Console.SetError(originalError);
+                }
+            }
+        }
+
+        private static int Run(CancellationToken cancellationToken, IExtractionProgressSink progressSink)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
             var scsPaths = GetScsPathsFromArgs();
             if (scsPaths.Length == 0)
             {
                 Console.Error.WriteLine("No .scs files were found.");
-                return;
+                return 1;
             }
+
+            var progressManager = progressSink is null ? null : new ExtractionProgressManager(progressSink, scsPaths.Length);
 
             if (opt.Benchmark)
             {
-                RunBenchmark(scsPaths);
-                return;
+                return RunBenchmark(scsPaths, cancellationToken);
             }
 
             if (opt.UseDeepExtractor && scsPaths.Length > 1)
             {
-                DoMultiDeepExtraction(scsPaths);
-                return;
+                return DoMultiDeepExtraction(scsPaths, cancellationToken, progressManager);
             }
+
+            var hadError = false;
 
             foreach (var scsPath in scsPaths)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 var swOpen = Stopwatch.StartNew();
-                var extractor = CreateExtractor(scsPath);
+                var extractor = CreateExtractor(scsPath, cancellationToken);
                 swOpen.Stop();
+
+                var archiveDisplayName = Path.GetFileName(scsPath) ?? scsPath;
+                var tracker = progressManager?.CreateTracker(archiveDisplayName, extractor is HashFsDeepExtractor);
+
                 if (extractor is null)
+                {
+                    tracker?.CompleteExtraction("Failed to open archive");
+                    hadError = true;
                     continue;
-
-                extractor.DryRun = opt.DryRun;
-                extractor.PrintTimesEnabled = opt.Times;
-                if (extractor is HashFsDeepExtractor hdeep)
-                {
-                    hdeep.SingleThreadedPathSearch = opt.SingleThread;
-                    if (!opt.SingleThread)
-                    {
-                        hdeep.ReaderPoolSize = opt.IoReaders > 0 ? opt.IoReaders : Math.Max(1, Environment.ProcessorCount);
-                    }
-                }
-                if (opt.Times)
-                {
-                    extractor.OpenTime = swOpen.Elapsed;
                 }
 
-                if (opt.ListEntries)
+                extractor.ProgressTracker = tracker;
+
+                try
                 {
-                    if (extractor is HashFsExtractor)
+                    extractor.CancellationToken = cancellationToken;
+                    extractor.DryRun = opt.DryRun;
+                    extractor.PrintTimesEnabled = opt.Times;
+                    if (extractor is HashFsDeepExtractor hdeep)
                     {
-                        ListEntries(extractor);
-                    }
-                    else
-                    {
-                        Console.Error.WriteLine("--list can only be used with HashFS archives.");
-                    }
-                }
-                else if (opt.ListPaths)
-                {
-                    extractor.PrintPaths(opt.PathFilter, opt.ListAll);
-                }
-                else if (opt.PrintTree)
-                {
-                    if (opt.UseRawExtractor)
-                    {
-                        Console.Error.WriteLine("--tree and --raw cannot be combined.");
-                    }
-                    else
-                    {
-                        var trees = extractor.GetDirectoryTree(opt.PathFilter);
-                        var scsName = Path.GetFileName(extractor.ScsPath);
-                        Tree.TreePrinter.Print(trees, scsName);
-                    }
-                }
-                else
-                {
-                    if (extractor is HashFsDeepExtractor hde)
-                    {
-                        if (opt.Times)
+                        hdeep.SingleThreadedPathSearch = opt.SingleThread;
+                        if (!opt.SingleThread)
                         {
-                            Console.WriteLine("Searching for paths ...");
-                            var swSearch = Stopwatch.StartNew();
-                            var (found, _) = hde.FindPaths();
-                            extractor.SearchTime = swSearch.Elapsed;
-                            var foundFiles = found.Order().ToArray();
-                            var swExtract = Stopwatch.StartNew();
-                            hde.Extract(foundFiles, opt.PathFilter, GetDestination(scsPath), false);
-                            extractor.ExtractTime = swExtract.Elapsed;
+                            hdeep.ReaderPoolSize = opt.IoReaders > 0 ? opt.IoReaders : Math.Max(1, Environment.ProcessorCount);
+                        }
+                    }
+                    if (opt.Times)
+                    {
+                        extractor.OpenTime = swOpen.Elapsed;
+                    }
+
+                    if (opt.ListEntries)
+                    {
+                        if (extractor is HashFsExtractor)
+                        {
+                            ListEntries(extractor);
                         }
                         else
                         {
-                            hde.Extract(opt.PathFilter, GetDestination(scsPath));
+                            Console.Error.WriteLine("--list can only be used with HashFS archives.");
+                            hadError = true;
                         }
+
+                        extractor.ProgressTracker?.CompleteExtraction("Listing entries");
                     }
-                    else
+                    else if (opt.ListPaths)
                     {
-                        if (opt.Times)
+                        extractor.PrintPaths(opt.PathFilter, opt.ListAll);
+                        extractor.ProgressTracker?.CompleteExtraction("Listing paths");
+                    }
+                    else if (opt.PrintTree)
+                    {
+                        if (opt.UseRawExtractor)
                         {
-                            var swExtract = Stopwatch.StartNew();
-                            extractor.Extract(opt.PathFilter, GetDestination(scsPath));
-                            extractor.ExtractTime = swExtract.Elapsed;
+                            Console.Error.WriteLine("--tree and --raw cannot be combined.");
+                            hadError = true;
                         }
                         else
                         {
-                            extractor.Extract(opt.PathFilter, GetDestination(scsPath));
+                            var trees = extractor.GetDirectoryTree(opt.PathFilter);
+                            var scsName = Path.GetFileName(extractor.ScsPath);
+                            Tree.TreePrinter.Print(trees, scsName);
                         }
+
+                        extractor.ProgressTracker?.CompleteExtraction("Generated tree");
                     }
-                    extractor.PrintExtractionResult();
+                    else
+                    {
+                        if (extractor is HashFsDeepExtractor hde)
+                        {
+                            if (opt.Times)
+                            {
+                                Console.WriteLine("Searching for paths ...");
+                                var swSearch = Stopwatch.StartNew();
+                                var (found, _) = hde.FindPaths();
+                                extractor.SearchTime = swSearch.Elapsed;
+                                var foundFiles = found.Order().ToArray();
+                                cancellationToken.ThrowIfCancellationRequested();
+                                var swExtract = Stopwatch.StartNew();
+                                hde.Extract(foundFiles, opt.PathFilter, GetDestination(scsPath), false);
+                                extractor.ExtractTime = swExtract.Elapsed;
+                            }
+                            else
+                            {
+                                hde.Extract(opt.PathFilter, GetDestination(scsPath));
+                            }
+                        }
+                        else
+                        {
+                            if (opt.Times)
+                            {
+                                var swExtract = Stopwatch.StartNew();
+                                extractor.Extract(opt.PathFilter, GetDestination(scsPath));
+                                extractor.ExtractTime = swExtract.Elapsed;
+                            }
+                            else
+                            {
+                                extractor.Extract(opt.PathFilter, GetDestination(scsPath));
+                            }
+                        }
+                        cancellationToken.ThrowIfCancellationRequested();
+                        extractor.PrintExtractionResult();
+                    }
+                }
+                finally
+                {
+                    extractor.Dispose();
                 }
             }
+
+            return hadError ? 1 : 0;
         }
 
         private static string GetDestination(string scsPath)
@@ -179,7 +290,7 @@ namespace Extractor
             return opt.Destination;
         }
 
-        private static Extractor CreateExtractor(string scsPath)
+        private static Extractor CreateExtractor(string scsPath, CancellationToken cancellationToken)
         {
             if (!File.Exists(scsPath))
             {
@@ -210,23 +321,40 @@ namespace Extractor
             {
                 Console.Error.WriteLine($"Unable to open {scsPath}: {ex.Message}");
             }
+            if (extractor is not null)
+            {
+                extractor.CancellationToken = cancellationToken;
+            }
             return extractor;
         }
 
-        private static void DoMultiDeepExtraction(string[] scsPaths)
+        private static int DoMultiDeepExtraction(string[] scsPaths, CancellationToken cancellationToken, ExtractionProgressManager progressManager)
         {
-            // If you're reading this ... maybe don't.
+            List<Extractor> extractors = new();
+            var hadError = false;
 
-            List<Extractor> extractors = [];
-            var openTimes = new Dictionary<string, TimeSpan>();
-            foreach (var scsPath in scsPaths)
+            try
             {
-                var swOpen = Stopwatch.StartNew();
-                var extractor = CreateExtractor(scsPath);
-                swOpen.Stop();
-                if (extractor is not null)
+                foreach (var scsPath in scsPaths)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var swOpen = Stopwatch.StartNew();
+                    var extractor = CreateExtractor(scsPath, cancellationToken);
+                    swOpen.Stop();
+
+                    var archiveDisplayName = Path.GetFileName(scsPath) ?? scsPath;
+                    var tracker = progressManager?.CreateTracker(archiveDisplayName, extractor is HashFsDeepExtractor);
+
+                    if (extractor is null)
+                    {
+                        tracker?.CompleteExtraction("Failed to open archive");
+                        hadError = true;
+                        continue;
+                    }
+
                     extractor.DryRun = opt.DryRun;
+                    extractor.ProgressTracker = tracker;
                     extractor.PrintTimesEnabled = opt.Times;
                     if (extractor is HashFsDeepExtractor hd)
                     {
@@ -236,114 +364,138 @@ namespace Extractor
                             hd.ReaderPoolSize = opt.IoReaders > 0 ? opt.IoReaders : Math.Max(1, Environment.ProcessorCount);
                         }
                     }
-                    extractors.Add(extractor);
-                    openTimes[extractor.ScsPath] = swOpen.Elapsed;
                     if (opt.Times)
                     {
                         extractor.OpenTime = swOpen.Elapsed;
-                    }                    
+                    }
+                    extractors.Add(extractor);
                 }
-            }
 
-            var bag = new System.Collections.Concurrent.ConcurrentBag<string>();
-            Parallel.ForEach(extractors, extractor =>
-            {
-                Console.WriteLine($"Searching for paths in {Path.GetFileName(extractor.ScsPath)} ...");
-                if (extractor is HashFsDeepExtractor hashFs)
+                var bag = new System.Collections.Concurrent.ConcurrentBag<string>();
+                var parallelOptions = new ParallelOptions
                 {
-                    var swSearch = Stopwatch.StartNew();
-                    var (found, referenced) = hashFs.FindPaths();
-                    swSearch.Stop();
-                    if (opt.Times)
-                    {
-                        extractor.SearchTime = swSearch.Elapsed;
-                    }
-                    foreach (var p in found)
-                    {
-                        bag.Add(p);
-                    }
-                    foreach (var p in referenced)
-                    {
-                        bag.Add(p);
-                    }
-                }
-                else if (extractor is ZipExtractor zip)
-                {
-                    var finder = new ZipPathFinder(zip.Reader);
-                    var swSearch = Stopwatch.StartNew();
-                    finder.Find();
-                    swSearch.Stop();
-                    if (opt.Times)
-                    {
-                        extractor.SearchTime = swSearch.Elapsed;
-                    }
-                    foreach (var p in finder.ReferencedFiles)
-                    {
-                        bag.Add(p);
-                    }
-                    foreach (var p in zip.Reader.Entries.Keys.Select(p => '/' + p))
-                    {
-                        bag.Add(p);
-                    }
-                }
-                else
-                {
-                    throw new ArgumentException("Unhandled extractor type");
-                }
-            });
+                    CancellationToken = cancellationToken
+                };
 
-            var everything = new HashSet<string>(bag);
-
-            var extractTimes = new Dictionary<string, TimeSpan>();
-            foreach (var extractor in extractors)
-            {
-                var existing = everything.Where(extractor.FileSystem.FileExists);
-
-                if (opt.ListPaths)
+                Parallel.ForEach(extractors, parallelOptions, extractor =>
                 {
-                    foreach (var path in existing.Order())
-                    {
-                        Console.WriteLine(ReplaceControlChars(path));
-                    }
-                }
-                else if (opt.PrintTree)
-                {
-                    var trees = opt.PathFilter
-                        .Select(startPath => PathListToTree(startPath, existing))
-                        .ToList();
-                    Tree.TreePrinter.Print(trees, Path.GetFileName(extractor.ScsPath));
-                }
-                else
-                {
+                    parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                    Console.WriteLine($"Searching for paths in {Path.GetFileName(extractor.ScsPath)} ...");
                     if (extractor is HashFsDeepExtractor hashFs)
                     {
-                        var swExtract = Stopwatch.StartNew();
-                        hashFs.Extract(existing.ToArray(), opt.PathFilter, GetDestination(extractor.ScsPath), true);
-                        extractTimes[extractor.ScsPath] = swExtract.Elapsed;
+                        var swSearch = Stopwatch.StartNew();
+                        var (found, referenced) = hashFs.FindPaths();
+                        swSearch.Stop();
                         if (opt.Times)
                         {
-                            extractor.ExtractTime = swExtract.Elapsed;
+                            extractor.SearchTime = swSearch.Elapsed;
+                        }
+                        foreach (var p in found)
+                        {
+                            parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                            bag.Add(p);
+                        }
+                        foreach (var p in referenced)
+                        {
+                            parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                            bag.Add(p);
+                        }
+                    }
+                    else if (extractor is ZipExtractor zip)
+                    {
+                        var finder = new ZipPathFinder(zip.Reader);
+                        var swSearch = Stopwatch.StartNew();
+                        finder.Find();
+                        swSearch.Stop();
+                        if (opt.Times)
+                        {
+                            extractor.SearchTime = swSearch.Elapsed;
+                        }
+                        foreach (var p in finder.ReferencedFiles)
+                        {
+                            parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                            bag.Add(p);
+                        }
+                        foreach (var p in zip.Reader.Entries.Keys.Select(p => '/' + p))
+                        {
+                            parallelOptions.CancellationToken.ThrowIfCancellationRequested();
+                            bag.Add(p);
                         }
                     }
                     else
                     {
-                        var swExtract = Stopwatch.StartNew();
-                        extractor.Extract(opt.PathFilter, GetDestination(extractor.ScsPath));
-                        extractTimes[extractor.ScsPath] = swExtract.Elapsed;
-                        if (opt.Times)
+                        throw new ArgumentException("Unhandled extractor type");
+                    }
+                });
+
+                var everything = new HashSet<string>(bag);
+
+                foreach (var extractor in extractors)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var existing = everything.Where(extractor.FileSystem.FileExists).ToArray();
+
+                    if (opt.ListPaths)
+                    {
+                        foreach (var path in existing.Order())
                         {
-                            extractor.ExtractTime = swExtract.Elapsed;
+                            cancellationToken.ThrowIfCancellationRequested();
+                            Console.WriteLine(ReplaceControlChars(path));
+                        }
+
+                        extractor.ProgressTracker?.CompleteExtraction("Listing paths");
+                    }
+                    else if (opt.PrintTree)
+                    {
+                        var trees = opt.PathFilter
+                            .Select(startPath => PathListToTree(startPath, existing))
+                            .ToList();
+                        Tree.TreePrinter.Print(trees, Path.GetFileName(extractor.ScsPath));
+
+                        extractor.ProgressTracker?.CompleteExtraction("Generated tree");
+                    }
+                    else
+                    {
+                        if (extractor is HashFsDeepExtractor hashFs)
+                        {
+                            var swExtract = Stopwatch.StartNew();
+                            hashFs.Extract(existing.ToArray(), opt.PathFilter, GetDestination(extractor.ScsPath), true);
+                            swExtract.Stop();
+                            if (opt.Times)
+                            {
+                                extractor.ExtractTime = swExtract.Elapsed;
+                            }
+                        }
+                        else
+                        {
+                            var swExtract = Stopwatch.StartNew();
+                            extractor.Extract(opt.PathFilter, GetDestination(extractor.ScsPath));
+                            swExtract.Stop();
+                            if (opt.Times)
+                            {
+                                extractor.ExtractTime = swExtract.Elapsed;
+                            }
                         }
                     }
                 }
-            }
 
-            if (!opt.ListPaths && !opt.PrintTree)
+                if (!opt.ListPaths && !opt.PrintTree)
+                {
+                    foreach (var extractor in extractors)
+                    {
+                        Console.Write($"{Path.GetFileName(extractor.ScsPath)}: ");
+                        extractor.PrintExtractionResult();
+                    }
+                }
+
+                return hadError ? 1 : 0;
+            }
+            finally
             {
                 foreach (var extractor in extractors)
                 {
-                    Console.Write($"{Path.GetFileName(extractor.ScsPath)}: ");
-                    extractor.PrintExtractionResult();
+                    extractor.ProgressTracker = null;
+                    extractor.Dispose();
                 }
             }
         }
@@ -360,13 +512,18 @@ namespace Extractor
             catch { return false; }
         }
 
-        private static void RunBenchmark(string[] scsPaths)
+        private static int RunBenchmark(string[] scsPaths, CancellationToken cancellationToken)
         {
+            var hadError = false;
+
             foreach (var scsPath in scsPaths)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (!IsHashFs(scsPath))
                 {
                     Console.Error.WriteLine($"Benchmark: skipping {Path.GetFileName(scsPath)} (not a HashFS archive)");
+                    hadError = true;
                     continue;
                 }
 
@@ -386,49 +543,58 @@ namespace Extractor
                     {
                         x.ReaderPoolSize = Math.Max(1, opt.IoReaders);
                     }
+                    x.CancellationToken = cancellationToken;
                     return x;
                 }
 
-                // Single-thread pass
-                var single = MakeExtractor(true);
-                var swSingle = Stopwatch.StartNew();
-                var (foundSingle, _) = single.FindPaths();
-                swSingle.Stop();
-                single.SearchTime = swSingle.Elapsed; // already set inside, but ensure measured wall time
-
-                // Multi-thread pass
-                var multi = MakeExtractor(false);
-                var swMulti = Stopwatch.StartNew();
-                var (foundMulti, _) = multi.FindPaths();
-                swMulti.Stop();
-                multi.SearchTime = swMulti.Elapsed;
-
-                void PrintBench(string title, HashFsDeepExtractor e, int found)
+                HashFsDeepExtractor single = null;
+                HashFsDeepExtractor multi = null;
+                try
                 {
-                    Console.WriteLine(
-                        $"  {title}: search={e.SearchTime.Value.TotalMilliseconds:F0}ms " +
-                        $"(decomp={e.SearchExtractTime.Value.TotalMilliseconds:F0}ms, " +
-                        $"decomp_wall={e.SearchExtractWallTime.Value.TotalMilliseconds:F0}ms, " +
-                        $"parse={e.SearchParseTime.Value.TotalMilliseconds:F0}ms, " +
-                        $"files={e.SearchFilesParsed.Value}, " +
-                        $"unique={e.SearchUniqueFilesParsed.Value}, " +
-                        $"bytes={e.SearchBytesInflated.Value}), " +
-                        $"found={found}");
+                    single = MakeExtractor(true);
+                    var swSingle = Stopwatch.StartNew();
+                    var (foundSingle, _) = single.FindPaths();
+                    swSingle.Stop();
+                    single.SearchTime = swSingle.Elapsed;
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    multi = MakeExtractor(false);
+                    var swMulti = Stopwatch.StartNew();
+                    var (foundMulti, _) = multi.FindPaths();
+                    swMulti.Stop();
+                    multi.SearchTime = swMulti.Elapsed;
+
+                    void PrintBench(string title, HashFsDeepExtractor e, int found)
+                    {
+                        Console.WriteLine(
+                            $"  {title}: search={e.SearchTime.Value.TotalMilliseconds:F0}ms " +
+                            $"(decomp={e.SearchExtractTime.Value.TotalMilliseconds:F0}ms, " +
+                            $"decomp_wall={e.SearchExtractWallTime.Value.TotalMilliseconds:F0}ms, " +
+                            $"parse={e.SearchParseTime.Value.TotalMilliseconds:F0}ms, " +
+                            $"files={e.SearchFilesParsed.Value}, " +
+                            $"unique={e.SearchUniqueFilesParsed.Value}, " +
+                            $"bytes={e.SearchBytesInflated.Value}), " +
+                            $"found={found}");
+                    }
+
+                    PrintBench("single-thread", single, foundSingle.Count);
+                    PrintBench("multi-thread", multi, foundMulti.Count);
+
+                    if (single.SearchTime.HasValue && multi.SearchTime.HasValue)
+                    {
+                        var speedup = single.SearchTime.Value.TotalMilliseconds / Math.Max(1, multi.SearchTime.Value.TotalMilliseconds);
+                        Console.WriteLine($"  speedup: x{speedup:F2}");
+                    }
                 }
-
-                PrintBench("single-thread", single, foundSingle.Count);
-                PrintBench("multi-thread", multi, foundMulti.Count);
-
-                if (single.SearchTime.HasValue && multi.SearchTime.HasValue)
+                finally
                 {
-                    var speedup = single.SearchTime.Value.TotalMilliseconds / Math.Max(1, multi.SearchTime.Value.TotalMilliseconds);
-                    Console.WriteLine($"  speedup: x{speedup:F2}");
+                    single?.Dispose();
+                    multi?.Dispose();
                 }
-
-                // Dispose
-                single.Dispose();
-                multi.Dispose();
             }
+
+            return hadError ? 1 : 0;
         }
 
         private static Extractor CreateHashFsExtractor(string scsPath)
@@ -493,15 +659,33 @@ namespace Extractor
             return scsPaths.Distinct().ToArray();
         }
 
+        private static void LaunchGui()
+        {
+            Application.SetHighDpiMode(HighDpiMode.SystemAware);
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+
         private static void PauseIfNecessary()
         {
-            if (launchedByExplorer)
+            if (launchedByExplorer && !Console.IsOutputRedirected)
             {
                 Console.WriteLine("Press any key to continue ...");
-                Console.Read();
+                Console.ReadKey(intercept: true);
             }
         }
     }
 }
+
+
+
+
+
+
+
+
+
+
 
 

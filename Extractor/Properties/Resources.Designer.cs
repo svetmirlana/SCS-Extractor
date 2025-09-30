@@ -65,5 +65,13 @@ namespace Extractor.Properties {
                 return (byte[])ResourceManager.GetObject("DeepStartPaths", resourceCulture);
             }
         }
+
+        internal static System.Drawing.Icon AppIcon {
+            get {
+                object obj = ResourceManager.GetObject("AppIcon", resourceCulture);
+                return ((System.Drawing.Icon)(obj));
+            }
+        }
+
     }
 }

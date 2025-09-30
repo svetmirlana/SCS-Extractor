@@ -1,13 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<OutputType>Exe</OutputType>
-		<TargetFramework>net8.0</TargetFramework>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
 		<AssemblyName>extractor</AssemblyName>
 		<RootNamespace>Extractor</RootNamespace>
+		<UseWindowsForms>true</UseWindowsForms>
 		<PublishSingleFile>true</PublishSingleFile>
 		<SelfContained>false</SelfContained>
 		<Version>2025.09.18</Version>
+		<ApplicationIcon>Resources\appicon.ico</ApplicationIcon>
 	</PropertyGroup>
 
 	<ItemGroup>

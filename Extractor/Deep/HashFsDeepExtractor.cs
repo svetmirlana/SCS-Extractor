@@ -1,4 +1,4 @@
-﻿using Sprache;
+using Sprache;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Extractor.Progress;
 using static Extractor.PathUtils;
 using static Extractor.ConsoleUtils;
 using TruckLib.Sii;
@@ -63,53 +64,67 @@ namespace Extractor.Deep
         /// <inheritdoc/>
         public override void Extract(IList<string> pathFilter, string outputRoot)
         {
+            ThrowIfCancellationRequested();
             Console.WriteLine("Searching for paths ...");
             FindPaths();
+            ThrowIfCancellationRequested();
             var foundFiles = finder.FoundFiles.Order().ToArray();
             Extract(foundFiles, pathFilter, outputRoot, false);
         }
 
         public void Extract(string[] foundFiles, IList<string> pathFilter, string outputRoot, bool ignoreMissing)
         {
+            ThrowIfCancellationRequested();
             bool filtersSet = !pathFilter.SequenceEqual(["/"]);
 
             substitutions = DeterminePathSubstitutions(foundFiles);
 
-            if (filtersSet)
-            {
-                foundFiles = foundFiles
-                    .Where(f => pathFilter.Any(f.StartsWith)).ToArray();
-            }
-            ExtractFiles(foundFiles, outputRoot, ignoreMissing);
+            var filteredFiles = filtersSet
+                ? foundFiles.Where(f => pathFilter.Any(f.StartsWith)).ToArray()
+                : foundFiles;
+
+            ProgressTracker?.BeginExtraction(filteredFiles.Length, $"Extracting {Path.GetFileName(ScsPath)}");
 
             var foundDecoyFiles = finder.FoundDecoyFiles.Order().ToArray();
-            if (filtersSet)
+            var filteredDecoyFiles = filtersSet
+                ? foundDecoyFiles.Where(f => pathFilter.Any(f.StartsWith)).ToArray()
+                : foundDecoyFiles;
+
+            if (filteredDecoyFiles.Length > 0)
             {
-                foundDecoyFiles = foundDecoyFiles
-                    .Where(f => pathFilter.Any(f.StartsWith)).ToArray();
+                ProgressTracker?.AddExtractionWork(filteredDecoyFiles.Length);
             }
+
+            ExtractFiles(filteredFiles, outputRoot, ignoreMissing);
+
             var decoyDestination = Path.Combine(outputRoot, DecoyDirectory);
-            foreach (var decoyFile in foundDecoyFiles)
+            foreach (var decoyFile in filteredDecoyFiles)
             {
+                ThrowIfCancellationRequested();
                 ExtractFile(decoyFile, decoyDestination);
             }
 
             if (!filtersSet)
             {
-                DumpUnrecovered(outputRoot, foundFiles.Concat(foundDecoyFiles));
+                DumpUnrecovered(outputRoot, filteredFiles.Concat(filteredDecoyFiles));
             }
 
             WriteRenamedSummary(outputRoot);
             WriteModifiedSummary(outputRoot);
+            ProgressTracker?.CompleteExtraction("Extraction finished");
         }
 
         public (HashSet<string> FoundFiles, HashSet<string> ReferencedFiles) FindPaths()
         {
             if (!hasSearchedForPaths)
             {
+                var totalCandidates = Reader.Entries.Values.Count(e => !e.IsDirectory);
+                ProgressTracker?.BeginSearch(totalCandidates, $"Searching {Path.GetFileName(ScsPath)}");
+
                 finder = new HashFsPathFinder(Reader, AdditionalStartPaths, junkEntries,
-                    SingleThreadedPathSearch, CreateReaderClone, ReaderPoolSize);
+                    SingleThreadedPathSearch, CreateReaderClone, ReaderPoolSize, ProgressTracker);
                 finder.Find();
+                ProgressTracker?.CompleteSearch("Search complete");
                 // Always populate detailed timing/metric fields for downstream reporting
                 SearchExtractTime = finder.ExtractTime;
                 SearchParseTime = finder.ParseTime;
@@ -134,9 +149,8 @@ namespace Extractor.Deep
             if (DryRun)
                 return;
 
-            var notRecovered = Reader.Entries.Values
-                .Where(e => !e.IsDirectory)
-                .Except(foundFiles.Select(f =>
+            var matchedEntries = foundFiles
+                .Select(f =>
                 {
                     if (Reader.EntryExists(f) != EntryType.NotFound)
                     {
@@ -144,34 +158,46 @@ namespace Extractor.Deep
                     }
                     junkEntries.TryGetValue(Reader.HashPath(f), out var retval);
                     return retval;
-                }));
+                })
+                .Where(e => e is not null)
+                .ToArray();
 
-            HashSet<ulong> visitedOffsets = [];
+            var notRecovered = Reader.Entries.Values
+                .Where(e => !e.IsDirectory)
+                .Except(matchedEntries!)
+                .Where(entry => entry is not null && !junkEntries.ContainsKey(entry.Hash) && !maybeJunkEntries.ContainsKey(entry.Hash))
+                .ToList();
+
+            if (notRecovered.Count == 0)
+            {
+                return;
+            }
+
+            ProgressTracker?.AddExtractionWork(notRecovered.Count);
 
             var outputDir = Path.Combine(destination, DumpDirectory);
 
             foreach (var entry in notRecovered)
             {
-                if (junkEntries.ContainsKey(entry.Hash))
-                    continue;
+                ThrowIfCancellationRequested();
 
-                if (maybeJunkEntries.ContainsKey(entry.Hash))
-                    continue;
-
-                var fileBuffer = Reader.Extract(entry, "")[0];
+                var fileBuffer = Reader.Extract(entry, string.Empty)[0];
                 var fileType = FileTypeHelper.Infer(fileBuffer);
                 var extension = FileTypeHelper.FileTypeToExtension(fileType);
                 var fileName = entry.Hash.ToString("x16") + extension;
+                var archivePath = $"/{DumpDirectory}/{fileName}";
                 var outputPath = Path.Combine(outputDir, fileName);
                 Console.WriteLine($"Dumping {fileName} ...");
                 if (!Overwrite && File.Exists(outputPath))
                 {
                     skipped++;
+                    ReportExtractionProgress(archivePath);
                 }
                 else
                 {
-                    ExtractToDisk(entry, $"/{DumpDirectory}/{fileName}", outputPath);
+                    ExtractToDisk(entry, archivePath, outputPath);
                     dumped++;
+                    ReportExtractionProgress(archivePath);
                 }
             }
         }
@@ -181,7 +207,8 @@ namespace Extractor.Deep
             var finder = new HashFsPathFinder(Reader,
                 singleThreaded: SingleThreadedPathSearch,
                 readerFactory: CreateReaderClone,
-                readerPoolSize: ReaderPoolSize);
+                readerPoolSize: ReaderPoolSize,
+                progressTracker: ProgressTracker);
             finder.Find();
             var paths = (includeAll
                 ? finder.FoundFiles.Union(finder.ReferencedFiles)
@@ -189,6 +216,7 @@ namespace Extractor.Deep
 
             foreach (var path in paths)
             {
+                ThrowIfCancellationRequested();
                 Console.WriteLine(ReplaceControlChars(path));
             }
         }
@@ -233,7 +261,8 @@ namespace Extractor.Deep
             var finder = new HashFsPathFinder(Reader,
                 singleThreaded: SingleThreadedPathSearch,
                 readerFactory: CreateReaderClone,
-                readerPoolSize: ReaderPoolSize);
+                readerPoolSize: ReaderPoolSize,
+                progressTracker: ProgressTracker);
             finder.Find();
 
             var trees = pathFilter
@@ -250,5 +279,9 @@ namespace Extractor.Deep
         }
     }
 }
+
+
+
+
 
 

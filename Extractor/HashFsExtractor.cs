@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -135,16 +135,19 @@ namespace Extractor
             );
             substitutions = DeterminePathSubstitutions(pathsToExtract);
 
+            ProgressTracker?.BeginExtraction(pathsToExtract.Count, $"Extracting {Path.GetFileName(ScsPath)}");
             ExtractFiles(pathsToExtract, outputRoot);
 
             WriteRenamedSummary(outputRoot);
             WriteModifiedSummary(outputRoot);
+            ProgressTracker?.CompleteExtraction("Extraction finished");
         }
 
         protected void ExtractFiles(IList<string> pathsToExtract, string outputRoot, bool ignoreMissing = false)
         {
             foreach (var archivePath in pathsToExtract)
             {
+                ThrowIfCancellationRequested();
                 ExtractFile(archivePath, outputRoot, ignoreMissing);
             }
         }
@@ -183,6 +186,7 @@ namespace Extractor
 
         protected void ExtractFile(string archivePath, string outputRoot, bool ignoreMissing = false)
         {
+            ThrowIfCancellationRequested();
             if (!Reader.FileExists(archivePath))
             {
                 if (ignoreMissing)
@@ -210,10 +214,12 @@ namespace Extractor
             if (!Overwrite && File.Exists(outputPath))
             {
                 skipped++;
+                ReportExtractionProgress(archivePath);
                 return;
             }
 
             ExtractToDisk(archivePath, outputPath);
+            ReportExtractionProgress(archivePath);
         }
 
         protected void ExtractToDisk(string archivePath, string outputPath)
@@ -545,4 +551,6 @@ namespace Extractor
         }
     }
 }
+
+
 

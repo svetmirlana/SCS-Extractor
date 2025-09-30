@@ -23,6 +23,7 @@ namespace Extractor
 
             foreach (var (key, entry) in Reader.Entries)
             {
+                ThrowIfCancellationRequested();
                 // subdirectory listings are useless because the file names are relative
                 if (entry.IsDirectory) continue;
 

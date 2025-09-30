@@ -1,4 +1,5 @@
-﻿using Extractor.Properties;
+using Extractor.Properties;
+using Extractor.Progress;
 using Sprache;
 using System;
 using System.Collections.Generic;
@@ -128,6 +129,7 @@ namespace Extractor.Deep
         public int UniqueFilesParsed => uniqueParsed.Count;
 
         private readonly bool singleThreaded;
+        private readonly ExtractionProgressTracker progressTracker;
 
         public HashFsPathFinder(
             IHashFsReader reader,
@@ -135,7 +137,8 @@ namespace Extractor.Deep
             Dictionary<ulong, IEntry> junkEntries = null,
             bool singleThreaded = false,
             Func<IHashFsReader> readerFactory = null,
-            int readerPoolSize = 1)
+            int readerPoolSize = 1,
+            ExtractionProgressTracker progressTracker = null)
         {
             this.reader = reader;
             this.additionalStartPaths = additionalStartPaths;
@@ -143,6 +146,7 @@ namespace Extractor.Deep
             this.singleThreaded = singleThreaded;
             this.readerFactory = readerFactory;
             this.readerPoolSize = Math.Max(1, readerPoolSize);
+            this.progressTracker = progressTracker;
 
             visited = [];
             visitedEntries = [];
@@ -352,6 +356,7 @@ namespace Extractor.Deep
                         {
                             potentialPaths.Add(p, visited);
                         }
+                        progressTracker?.IncrementSearch(1, entry.Hash.ToString("x16"));
                     }
                     #if DEBUG
                     catch (Exception ex)
@@ -435,6 +440,7 @@ namespace Extractor.Deep
                             if (!junkEntries.ContainsKey(entry.Hash))
                                 junkEntries[entry.Hash] = entry;
                         }
+                        progressTracker?.IncrementSearch(1, entry.Hash.ToString("x16"));
                         return;
                     }
                     catch (Exception)
@@ -442,6 +448,7 @@ namespace Extractor.Deep
                         #if DEBUG
                             Debugger.Break();
                         #endif
+                        progressTracker?.IncrementSearch(1, entry.Hash.ToString("x16"));
                         return;
                     }
 
@@ -486,8 +493,10 @@ namespace Extractor.Deep
                             Console.Error.WriteLine($"Unable to parse {entry.Hash:X16}{extension}: " +
                                 $"{ex.GetType().Name}: {ex.Message}");
                         #endif
+                        progressTracker?.IncrementSearch(1, entry.Hash.ToString("x16"));
                         return;
                     }
+                    progressTracker?.IncrementSearch(1, entry.Hash.ToString("x16"));
                 });
                 return new PotentialPaths(bag);
             }
@@ -695,6 +704,7 @@ namespace Extractor.Deep
             System.Threading.Interlocked.Add(ref parseTicks, swParse.ElapsedTicks);
             System.Threading.Interlocked.Increment(ref filesParsed);
             uniqueParsed.TryAdd(filePath ?? string.Empty, 0);
+            progressTracker?.IncrementSearch(1, filePath);
             return result;
         }
 
@@ -737,3 +747,11 @@ namespace Extractor.Deep
         }
     }
 }
+
+
+
+
+
+
+
+
