@@ -138,7 +138,9 @@ namespace Extractor
         }
 
         internal static bool ExtractWithSubstitutionsIfRequired(string archivePath, string outputPath,
-            byte[] buffer, Dictionary<string, string> substitutions)
+            byte[] buffer, Dictionary<string, string> substitutions,
+            Func<string, string, string> transformSubstitution = null,
+            Action<string, string> onSubstitution = null)
         {
             var wasModified = false;
 
@@ -147,11 +149,13 @@ namespace Extractor
             {
                 if (extension == ".sii" || extension == ".sui" || extension == ".mat")
                 {
-                    (wasModified, buffer) = SubstitutePathsInTextFormats(buffer, substitutions, extension);
+                    (wasModified, buffer) = SubstitutePathsInTextFormats(buffer, substitutions, extension,
+                        transformSubstitution, onSubstitution);
                 }
                 else if (extension == ".tobj")
                 {
-                    (wasModified, buffer) = SubstitutePathsInTobj(buffer, substitutions);
+                    (wasModified, buffer) = SubstitutePathsInTobj(buffer, substitutions,
+                        transformSubstitution, onSubstitution);
                 }
             }
             else

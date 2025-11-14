@@ -21,7 +21,6 @@ namespace Extractor
         private bool _destinationTouched;
         private bool _suppressDestinationChange;
         private string? _lastAutoDestination;
-        private OptionsSnapshot? _manualSnapshot;
         private CancellationTokenSource? _extractionCts;
         private bool _isBusy;
         private GuiProgressSink? _progressSink;
@@ -163,12 +162,7 @@ namespace Extractor
 
             if (chkRecommended.Checked)
             {
-                _manualSnapshot = CaptureOptions();
                 ApplyRecommendedProfile();
-            }
-            else if (_manualSnapshot is not null)
-            {
-                RestoreOptions(_manualSnapshot);
             }
 
             UpdateOptionsEnabledState();
@@ -286,57 +280,6 @@ namespace Extractor
             _separateTouched = false;
             _destinationTouched = false;
             UpdateDefaultDestination();
-        }
-
-        private OptionsSnapshot CaptureOptions()
-        {
-            return new OptionsSnapshot
-            {
-                Deep = chkDeep.Checked,
-                Raw = chkRaw.Checked,
-                SkipExisting = chkSkipExisting.Checked,
-                Separate = chkSeparate.Checked,
-                SingleThread = chkSingleThread.Checked,
-                Times = chkTimes.Checked,
-                LegacySanitize = chkLegacySanitize.Checked,
-                DryRun = chkDryRun.Checked,
-                SuppressLog = chkSuppressLog.Checked,
-                IoReaders = numIoReaders.Value,
-                Salt = txtSalt.Text,
-                SeparateTouched = _separateTouched
-            };
-        }
-
-        private void RestoreOptions(OptionsSnapshot snapshot)
-        {
-            _updatingOptions = true;
-            chkDeep.Checked = snapshot.Deep;
-            chkRaw.Checked = snapshot.Raw;
-            chkSkipExisting.Checked = snapshot.SkipExisting;
-            chkSeparate.Checked = snapshot.Separate;
-            chkSingleThread.Checked = snapshot.SingleThread;
-            chkTimes.Checked = snapshot.Times;
-            chkLegacySanitize.Checked = snapshot.LegacySanitize;
-            chkDryRun.Checked = snapshot.DryRun;
-            chkSuppressLog.Checked = snapshot.SuppressLog;
-            numIoReaders.Value = ClampToRange(snapshot.IoReaders, numIoReaders.Minimum, numIoReaders.Maximum);
-            txtSalt.Text = snapshot.Salt;
-            _updatingOptions = false;
-            _suppressLog = chkSuppressLog.Checked;
-            _separateTouched = snapshot.SeparateTouched;
-        }
-
-        private decimal ClampToRange(decimal value, decimal minimum, decimal maximum)
-        {
-            if (value < minimum)
-            {
-                return minimum;
-            }
-            if (value > maximum)
-            {
-                return maximum;
-            }
-            return value;
         }
 
         private void SetSeparateChecked(bool value)
@@ -952,21 +895,6 @@ namespace Extractor
 
                 Apply();
             }
-        }
-        private sealed class OptionsSnapshot
-        {
-            public bool Deep { get; init; }
-            public bool Raw { get; init; }
-            public bool SkipExisting { get; init; }
-            public bool Separate { get; init; }
-            public bool SingleThread { get; init; }
-            public bool Times { get; init; }
-            public bool LegacySanitize { get; init; }
-            public bool DryRun { get; init; }
-            public decimal IoReaders { get; init; }
-            public string Salt { get; init; } = string.Empty;
-            public bool SeparateTouched { get; init; }
-            public bool SuppressLog { get; init; }
         }
     }
 }

@@ -242,7 +242,18 @@ namespace Extractor
                 var buffers = Reader.Extract(entry, archivePath);
 
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
-                var wasModified = ExtractWithSubstitutionsIfRequired(archivePath, outputPath, buffers[0], substitutions);
+
+                var sanitizedArchivePath = archivePath;
+                if (substitutions is not null && substitutions.TryGetValue(archivePath, out var sanitized))
+                {
+                    sanitizedArchivePath = sanitized;
+                }
+
+                var (transformSubstitution, substitutionCallback, replacements) =
+                    GetPathSubstitutionHandlers(archivePath, sanitizedArchivePath, outputPath);
+
+                var wasModified = ExtractWithSubstitutionsIfRequired(archivePath, outputPath, buffers[0], substitutions,
+                    transformSubstitution, substitutionCallback);
 
                 if (entry is EntryV2 v2 && v2.TobjMetadata is not null)
                 {
@@ -263,7 +274,10 @@ namespace Extractor
 
                 extracted++;
                 if (wasModified)
+                {
                     modifiedFiles.Add(archivePath);
+                    OnFileSubstituted(archivePath, sanitizedArchivePath, outputPath, replacements);
+                }
             }
             catch (InvalidDataException idex)
             {
@@ -281,6 +295,18 @@ namespace Extractor
             {
                 PrintExtractionFailure(archivePath, ex.ToString());
             }
+        }
+
+        protected virtual (Func<string, string, string> Transform, Action<string, string> Callback,
+            List<(string Original, string Replacement)> Replacements) GetPathSubstitutionHandlers(
+                string archivePath, string sanitizedArchivePath, string outputPath)
+        {
+            return (null, null, null);
+        }
+
+        protected virtual void OnFileSubstituted(string archivePath, string sanitizedArchivePath, string outputPath,
+            List<(string Original, string Replacement)> replacements)
+        {
         }
 
         protected void IdentifyJunkEntries()

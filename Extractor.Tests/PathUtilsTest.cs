@@ -140,6 +140,26 @@ namespace Extractor.Tests
         }
 
         [Fact]
+        public void SanitizePath_SanitizesExtensionWhenReplacingFileName()
+        {
+            var originalLegacy = PathUtils.LegacyReplaceMode;
+            var originalThreshold = PathUtils.NameCounterThreshold;
+            try
+            {
+                PathUtils.LegacyReplaceMode = false;
+                PathUtils.NameCounterThreshold = 0.10;
+                PathUtils.ResetNameCounter();
+                var result = PathUtils.SanitizePath("/foo/:???.*?");
+                Assert.Equal("/foo/F00000000.x2Ax3F", result);
+            }
+            finally
+            {
+                PathUtils.LegacyReplaceMode = originalLegacy;
+                PathUtils.NameCounterThreshold = originalThreshold;
+            }
+        }
+
+        [Fact]
         public void AppendBeforeExtension()
         {
             Assert.Equal("/a/b/c42.txt", PathUtils.AppendBeforeExtension("/a/b/c.txt", "42"));

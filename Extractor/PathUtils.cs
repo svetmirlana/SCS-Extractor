@@ -107,9 +107,9 @@ namespace Extractor
                 {
                     if (i == lastIdx && hasFileName)
                     {
-                        // Replace the entire file name with a counter, but preserve extension
+                        // Replace the entire file name with a counter, but preserve (and sanitize) extension
                         var baseName = Path.GetFileNameWithoutExtension(parts[i]);
-                        var ext = Path.GetExtension(parts[i]);
+                        var ext = ReplaceCharsUnambiguously(Path.GetExtension(parts[i]), invalid);
                         parts[i] = GetTokenForKey(baseName, "F") + ext;
                     }
                     else
@@ -285,11 +285,11 @@ namespace Extractor
 
                 if (c == '/')
                 {
-                    if (i > 0 && str[i - 1] == '/')
+                    /* if (i > 0 && str[i - 1] == '/')
                     {
                         // don't allow "//"
                         return false;
-                    }
+                    } */
                     hasSlashOrDot = true;
                 }
                 else if (c == '.')

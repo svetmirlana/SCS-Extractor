@@ -110,8 +110,10 @@ namespace Extractor
         /// <param name="substitutions">The substitutions to be made.</param>
         /// <returns>A version of the text in which all character ranges for which a substituion
         /// exists have been updated accordingly.</returns>
-        public static (string Text, bool Modified) ReplaceStrings(string text, List<Range> ranges, 
-            Dictionary<string, string> substitutions)
+        public static (string Text, bool Modified) ReplaceStrings(string text, List<Range> ranges,
+            Dictionary<string, string> substitutions,
+            Func<string, string, string> transformSubstitution = null,
+            Action<string, string> onSubstitution = null)
         {
             var sb = new StringBuilder();
             var textSpan = text.AsSpan();
@@ -122,11 +124,14 @@ namespace Extractor
             {
                 sb.Append(textSpan[prev..range.Start]);
                 var target = textSpan[range];
-                if (substitutions.TryGetValue(target.ToString(), out var substitution))
+                var original = target.ToString();
+                if (substitutions.TryGetValue(original, out var substitution))
                 {
-                    sb.Append(substitution);
+                    var final = transformSubstitution?.Invoke(original, substitution) ?? substitution;
+                    sb.Append(final);
                     prev = range.End.Value;
                     modified = true;
+                    onSubstitution?.Invoke(original, final);
                 }
                 else
                 {
@@ -139,14 +144,16 @@ namespace Extractor
         }
 
         public static (string Text, bool Modified) ReplaceRenamedPaths(string text,
-            Dictionary<string, string> substitutions)
+            Dictionary<string, string> substitutions,
+            Func<string, string, string> transformSubstitution = null,
+            Action<string, string> onSubstitution = null)
         {
             var modified = false;
 
             var ranges = FindQuotedPaths(text);
             if (ranges.Count > 0)
             {
-                (text, modified) = ReplaceStrings(text, ranges, substitutions);
+                (text, modified) = ReplaceStrings(text, ranges, substitutions, transformSubstitution, onSubstitution);
             }
 
             return (text, modified);

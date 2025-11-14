@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<OutputType>WinExe</OutputType>
+		<OutputType>Exe</OutputType>
 		<TargetFramework>net8.0-windows</TargetFramework>
 		<AssemblyName>extractor</AssemblyName>
 		<RootNamespace>Extractor</RootNamespace>
@@ -14,8 +14,12 @@
 
 	<ItemGroup>
 		<PackageReference Include="Mono.Options" Version="6.12.0.148" />
-		<PackageReference Include="TruckLib.HashFs" Version="0.1.17" />
-		<PackageReference Include="TruckLib.Sii" Version="0.1.12" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\TruckLib.HashFs\TruckLib.HashFs\TruckLib.HashFs.csproj" />
+		<ProjectReference Include="..\TruckLib.Core\TruckLib.Core\TruckLib.Core.csproj" />
+		<ProjectReference Include="..\TruckLib.Sii\TruckLib.Sii\TruckLib.Sii.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

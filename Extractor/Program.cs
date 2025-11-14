@@ -661,6 +661,11 @@ namespace Extractor
 
         private static void LaunchGui()
         {
+            if (OperatingSystem.IsWindows())
+            {
+                ConsoleManager.ReleaseConsole(allocated: true);
+            }
+
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);

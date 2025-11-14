@@ -150,6 +150,21 @@ namespace Extractor.Zip
             return Entries.ContainsKey(path);
         }
 
+        bool IFileSystem.DirectoryExists(string path)
+        {
+            if (string.IsNullOrEmpty(path) || path == "/")
+                return true;
+
+            RemoveInitialSlash(ref path);
+            path = path.TrimEnd('/');
+
+            if (Entries.ContainsKey(path + "/"))
+                return true;
+
+            return Entries.Keys.Any(entry =>
+                entry.StartsWith(path + "/", StringComparison.OrdinalIgnoreCase));
+        }
+
         IList<string> IFileSystem.GetFiles(string path) 
             => throw new NotImplementedException();
 
